@@ -16,7 +16,8 @@ Use a single orchestration config file (YAML/JSON) that defines an array of bot 
 
 - `name`: human-readable label for logging/alerts.
 - `exchange`: currently `extended`.
-- `env_file`: path to the `.env` file containing wallet/API keys for that bot.
+- `env` (optional): mapping of environment variables (API keys, secrets, etc.) to inject for this bot. Values support `${VAR}` expansion.
+- `env_file` (optional): path to a `.env` file if you prefer to keep credentials there. If both `env_file` and `env` are provided, their values are merged, with explicit `env` keys taking precedence.
 - `schedule`: cron-like window (start/end UTC or repeated intervals).
 - `cli_args`: hedge-mode arguments (`--ticker`, `--size-min`, etc.).
 - `alerts`: overrides for Telegram chat ID or severity thresholds (optional).
@@ -26,7 +27,14 @@ Example (YAML):
 ```yaml
 bots:
   - name: sol_wallet_a
-    env_file: configs/sol_wallet_a.env
+    env:
+      EXTENDED_API_KEY: ${EXTENDED_API_KEY}
+      EXTENDED_STARK_KEY_PRIVATE: ${EXTENDED_STARK_KEY_PRIVATE}
+      EXTENDED_STARK_KEY_PUBLIC: ${EXTENDED_STARK_KEY_PUBLIC}
+      EXTENDED_VAULT: ${EXTENDED_VAULT}
+      API_KEY_PRIVATE_KEY: ${API_KEY_PRIVATE_KEY}
+      LIGHTER_ACCOUNT_INDEX: ${LIGHTER_ACCOUNT_INDEX}
+      LIGHTER_API_KEY_INDEX: ${LIGHTER_API_KEY_INDEX}
     schedule:
       start: "00:05"   # UTC
       stop:  "06:55"

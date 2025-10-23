@@ -1,0 +1,27 @@
+bots:
+  - name: sol_main
+    env:
+      EXTENDED_API_KEY: ${EXTENDED_API_KEY}
+      EXTENDED_STARK_KEY_PRIVATE: ${EXTENDED_STARK_KEY_PRIVATE}
+      EXTENDED_STARK_KEY_PUBLIC: ${EXTENDED_STARK_KEY_PUBLIC}
+      EXTENDED_VAULT: ${EXTENDED_VAULT}
+      API_KEY_PRIVATE_KEY: ${API_KEY_PRIVATE_KEY}
+      LIGHTER_ACCOUNT_INDEX: ${LIGHTER_ACCOUNT_INDEX}
+      LIGHTER_API_KEY_INDEX: ${LIGHTER_API_KEY_INDEX}
+    schedule:
+      start: "00:00"
+      stop: "23:59"
+    cli_args:
+      exchange: extended
+      ticker: SOL
+      size: 1
+      iter: 20
+      fill-timeout: 5
+      size-min: 0.2
+      size-max: 0.3
+      size-step: 0.01
+      delay-min: 15
+      delay-max: 60
+      hold-min: 30
+      hold-max: 90
+      direction-mode: random

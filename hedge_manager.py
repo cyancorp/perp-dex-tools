@@ -46,9 +46,10 @@ class ScheduleWindow:
 @dataclass
 class BotConfig:
     name: str
-    env_file: Path
+    env_file: Optional[Path]
     cli_args: Dict[str, Any]
     schedule: ScheduleWindow
+    env_vars: Dict[str, str] = field(default_factory=dict)
     alerts_chat_id: Optional[str] = None
     alerts_token: Optional[str] = None
 
@@ -86,7 +87,11 @@ class BotState:
         LOGGER.info("Starting bot %s with command: %s", self.config.name, " ".join(cmd))
 
         env = os.environ.copy()
-        env.update(dotenv_values(self.config.env_file))
+        if self.config.env_file:
+            env.update(dotenv_values(self.config.env_file))
+        if self.config.env_vars:
+            expanded = {k: os.path.expandvars(str(v)) for k, v in self.config.env_vars.items()}
+            env.update(expanded)
         log_path = Path("logs") / f"manager_{self.config.name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_handle = open(log_path, "a", buffering=1)
@@ -186,10 +191,12 @@ def load_config(path: Path) -> List[BotConfig]:
     configs: List[BotConfig] = []
     for entry in bots_cfg:
         name = entry["name"]
-        env_file = Path(entry["env_file"]).expanduser()
+        env_file_value = entry.get("env_file")
+        env_file = Path(env_file_value).expanduser() if env_file_value else None
         schedule_cfg = entry["schedule"]
         schedule = ScheduleWindow.from_strings(schedule_cfg["start"], schedule_cfg["stop"])
         cli_args = entry.get("cli_args", {})
+        env_vars = entry.get("env", {})
         alerts = entry.get("alerts", {})
         configs.append(
             BotConfig(
@@ -197,6 +204,7 @@ def load_config(path: Path) -> List[BotConfig]:
                 env_file=env_file,
                 cli_args=cli_args,
                 schedule=schedule,
+                env_vars=env_vars,
                 alerts_chat_id=alerts.get("chat_id"),
                 alerts_token=alerts.get("token"),
             )
