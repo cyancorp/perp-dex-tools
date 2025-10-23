@@ -52,6 +52,26 @@ Examples:
                         help='Timeout in seconds for maker order fills (default: 5)')
     parser.add_argument('--env-file', type=str, default=".env",
                         help=".env file path (default: .env)")
+    parser.add_argument('--size-min', type=str,
+                        help='Minimum order size when randomizing order quantity')
+    parser.add_argument('--size-max', type=str,
+                        help='Maximum order size when randomizing order quantity')
+    parser.add_argument('--size-step', type=str,
+                        help='Step size to align randomized order quantities')
+    parser.add_argument('--delay-min', type=float,
+                        help='Minimum delay in seconds between placing Extended orders')
+    parser.add_argument('--delay-max', type=float,
+                        help='Maximum delay in seconds between placing Extended orders')
+    parser.add_argument('--buy-offset-bps-min', type=float,
+                        help='Minimum markup in basis points for Lighter hedge buys')
+    parser.add_argument('--buy-offset-bps-max', type=float,
+                        help='Maximum markup in basis points for Lighter hedge buys')
+    parser.add_argument('--sell-offset-bps-min', type=float,
+                        help='Minimum markdown in basis points for Lighter hedge sells')
+    parser.add_argument('--sell-offset-bps-max', type=float,
+                        help='Maximum markdown in basis points for Lighter hedge sells')
+    parser.add_argument('--direction-mode', type=str, choices=['buy', 'sell', 'random'],
+                        help='(Extended only) Opening order direction: always buy, always sell, or random')
     
     return parser.parse_args()
 
@@ -113,12 +133,28 @@ async def main():
     
     try:
         # Create the hedge bot instance
-        bot = HedgeBotClass(
-            ticker=args.ticker.upper(),
-            order_quantity=Decimal(args.size),
-            fill_timeout=args.fill_timeout,
-            iterations=args.iter
-        )
+        bot_kwargs = {
+            'ticker': args.ticker.upper(),
+            'order_quantity': Decimal(args.size),
+            'fill_timeout': args.fill_timeout,
+            'iterations': args.iter
+        }
+
+        if args.exchange.lower() == 'extended':
+            bot_kwargs.update({
+                'order_size_min': Decimal(args.size_min) if args.size_min else None,
+                'order_size_max': Decimal(args.size_max) if args.size_max else None,
+                'order_size_step': Decimal(args.size_step) if args.size_step else None,
+                'order_delay_min': args.delay_min,
+                'order_delay_max': args.delay_max,
+                'lighter_buy_offset_bps_min': Decimal(str(args.buy_offset_bps_min)) if args.buy_offset_bps_min is not None else None,
+                'lighter_buy_offset_bps_max': Decimal(str(args.buy_offset_bps_max)) if args.buy_offset_bps_max is not None else None,
+                'lighter_sell_offset_bps_min': Decimal(str(args.sell_offset_bps_min)) if args.sell_offset_bps_min is not None else None,
+                'lighter_sell_offset_bps_max': Decimal(str(args.sell_offset_bps_max)) if args.sell_offset_bps_max is not None else None,
+                'direction_mode': args.direction_mode or 'random',
+            })
+
+        bot = HedgeBotClass(**bot_kwargs)
         
         # Run the bot
         await bot.run()

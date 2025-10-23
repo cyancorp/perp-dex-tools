@@ -299,6 +299,29 @@ python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
 - `--size`: Order quantity per trade
 - `--iter`: Number of trading cycles
 - `--fill-timeout`: Maker order fill timeout in seconds (default: 5)
+- `--direction-mode`: (Extended only) Opening direction behaviour: `buy`, `sell`, or `random`
+
+### Extended Hedge Mode Randomization
+
+To make activity less deterministic when running the Extended + Lighter hedge bot you can supply the optional range
+parameters above. The bot will:
+
+- pick a fresh maker size inside `--size-min`…`--size-max` (respecting `--size-step` when provided),
+- sleep a random duration between `--delay-min` and `--delay-max` seconds before each Extended order,
+- jitter the Lighter hedge price within the configured basis-point windows.
+- choose the opening side according to `--direction-mode` (set it to `random` to flip between longs and shorts).
+
+### Risk Monitoring Utility
+
+A lightweight risk monitor is available via `risk_manager.py`. It connects to the same Extended/Lighter accounts and prints net exposure and available margin every minute:
+
+```bash
+uv run risk_manager.py --ticker SOL --interval 60 --env-file .env
+```
+
+Extend the interval as needed; additional risk controls can be layered on top of this standalone process.
+
+Keep the ranges within the venue limits (minimum quantity, tick size, etc.) to avoid rejected orders.
 
 ## Configuration
 

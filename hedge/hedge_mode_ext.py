@@ -5,12 +5,13 @@ import logging
 import os
 import sys
 import time
+import random
 import requests
 import argparse
 import traceback
 import csv
-from decimal import Decimal
-from typing import Tuple
+from decimal import Decimal, ROUND_DOWN
+from typing import Tuple, Optional
 
 from lighter.signer_client import SignerClient
 import sys
@@ -33,7 +34,23 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on Extended and hedges with market orders on Lighter."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20):
+    def __init__(
+            self,
+            ticker: str,
+            order_quantity: Decimal,
+            fill_timeout: int = 5,
+            iterations: int = 20,
+            order_size_min: Optional[Decimal] = None,
+            order_size_max: Optional[Decimal] = None,
+            order_size_step: Optional[Decimal] = None,
+            order_delay_min: Optional[float] = None,
+            order_delay_max: Optional[float] = None,
+            lighter_buy_offset_bps_min: Optional[Decimal] = None,
+            lighter_buy_offset_bps_max: Optional[Decimal] = None,
+            lighter_sell_offset_bps_min: Optional[Decimal] = None,
+            lighter_sell_offset_bps_max: Optional[Decimal] = None,
+            direction_mode: str = 'random'
+    ):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
@@ -42,6 +59,51 @@ class HedgeBot:
         self.extended_position = Decimal('0')
         self.lighter_position = Decimal('0')
         self.current_order = {}
+
+        # Randomization configuration
+        self._rng = random.SystemRandom()
+        self.order_size_min = order_size_min if order_size_min is not None else order_quantity
+        self.order_size_max = order_size_max if order_size_max is not None else order_quantity
+        if self.order_size_min > self.order_size_max:
+            raise ValueError("order_size_min cannot be greater than order_size_max")
+        self.order_size_step = order_size_step
+        if self.order_size_step is not None and self.order_size_step <= 0:
+            raise ValueError("order_size_step must be positive")
+        if self.order_size_step is not None:
+            self.quantity_precision = self.order_size_step
+        else:
+            self.quantity_precision = Decimal('0.00000001')
+
+        self.order_delay_min = order_delay_min
+        self.order_delay_max = order_delay_max
+        if (self.order_delay_min is not None) != (self.order_delay_max is not None):
+            if self.order_delay_min is None:
+                self.order_delay_min = self.order_delay_max
+            else:
+                self.order_delay_max = self.order_delay_min
+        if self.order_delay_min is not None and self.order_delay_max is not None:
+            if self.order_delay_min > self.order_delay_max:
+                raise ValueError("order_delay_min cannot be greater than order_delay_max")
+
+        self.lighter_buy_offset_bps_min = lighter_buy_offset_bps_min if lighter_buy_offset_bps_min is not None else Decimal('20')
+        self.lighter_buy_offset_bps_max = lighter_buy_offset_bps_max if lighter_buy_offset_bps_max is not None else self.lighter_buy_offset_bps_min
+        if self.lighter_buy_offset_bps_min > self.lighter_buy_offset_bps_max:
+            raise ValueError("lighter_buy_offset_bps_min cannot be greater than lighter_buy_offset_bps_max")
+
+        self.lighter_sell_offset_bps_min = lighter_sell_offset_bps_min if lighter_sell_offset_bps_min is not None else Decimal('20')
+        self.lighter_sell_offset_bps_max = lighter_sell_offset_bps_max if lighter_sell_offset_bps_max is not None else self.lighter_sell_offset_bps_min
+        if self.lighter_sell_offset_bps_min > self.lighter_sell_offset_bps_max:
+            raise ValueError("lighter_sell_offset_bps_min cannot be greater than lighter_sell_offset_bps_max")
+
+        self.lighter_offset_precision = Decimal('0.01')
+        self.lighter_price_step = None
+        self.lighter_quantity_step = None
+        self.current_cycle_quantity = None
+        self.current_cycle_open_side = None
+        allowed_directions = {'buy', 'sell', 'random'}
+        if direction_mode not in allowed_directions:
+            raise ValueError(f"direction_mode must be one of {allowed_directions}")
+        self.direction_mode = direction_mode
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -85,6 +147,21 @@ class HedgeBot:
 
         # Prevent propagation to root logger to avoid duplicate messages
         self.logger.propagate = False
+
+        if self.order_size_min != self.order_size_max:
+            self.logger.info(f"🎲 Order size range active: {self.order_size_min} → {self.order_size_max} "
+                             f"(step: {self.order_size_step or 'continuous'})")
+        if self.order_delay_min is not None and self.order_delay_max is not None:
+            self.logger.info(f"⏱️ Random delay range active: {self.order_delay_min}s → {self.order_delay_max}s")
+        if (self.lighter_buy_offset_bps_min != self.lighter_buy_offset_bps_max or
+                self.lighter_sell_offset_bps_min != self.lighter_sell_offset_bps_max):
+            self.logger.info("📐 Random Lighter hedge offsets enabled: "
+                             f"buy +{self.lighter_buy_offset_bps_min}→{self.lighter_buy_offset_bps_max} bps | "
+                             f"sell -{self.lighter_sell_offset_bps_min}→{self.lighter_sell_offset_bps_max} bps")
+        if self.direction_mode == 'random':
+            self.logger.info("🔀 Opening direction mode: random")
+        else:
+            self.logger.info(f"➡️ Opening direction mode: always {self.direction_mode.upper()}")
 
         # State management
         self.stop_flag = False
@@ -200,6 +277,54 @@ class HedgeBot:
             ])
 
         self.logger.info(f"📊 Trade logged to CSV: {exchange} {side} {quantity} @ {price}")
+
+    def _random_bps(self, minimum: Decimal, maximum: Decimal) -> Decimal:
+        """Select a random basis-point value within range."""
+        if minimum == maximum:
+            return minimum
+        random_value = Decimal(str(self._rng.uniform(float(minimum), float(maximum))))
+        return random_value.quantize(self.lighter_offset_precision, rounding=ROUND_DOWN)
+
+    def _choose_lighter_multiplier(self, lighter_side: str) -> Tuple[Decimal, Decimal]:
+        """Select randomized multiplier and return multiplier with chosen bps."""
+        if lighter_side.lower() == 'buy':
+            bps = self._random_bps(self.lighter_buy_offset_bps_min, self.lighter_buy_offset_bps_max)
+            multiplier = Decimal('1') + (bps / Decimal('10000'))
+        else:
+            bps = self._random_bps(self.lighter_sell_offset_bps_min, self.lighter_sell_offset_bps_max)
+            multiplier = Decimal('1') - (bps / Decimal('10000'))
+        return multiplier, bps
+
+    def _choose_order_quantity(self) -> Decimal:
+        """Select randomized order quantity."""
+        if self.order_size_min == self.order_size_max:
+            return self.order_size_min
+
+        if self.order_size_step is not None:
+            span = (self.order_size_max - self.order_size_min) / self.order_size_step
+            step_count = int(span.to_integral_value(rounding=ROUND_DOWN))
+            step_index = self._rng.randint(0, max(step_count, 1))
+            quantity = self.order_size_min + self.order_size_step * Decimal(step_index)
+            if quantity > self.order_size_max:
+                quantity = self.order_size_max
+            return quantity.quantize(self.order_size_step, rounding=ROUND_DOWN)
+
+        span = self.order_size_max - self.order_size_min
+        random_fraction = Decimal(str(self._rng.random()))
+        quantity = (self.order_size_min + span * random_fraction).quantize(self.quantity_precision, rounding=ROUND_DOWN)
+        if quantity < self.order_size_min:
+            quantity = self.order_size_min
+        if quantity > self.order_size_max:
+            quantity = self.order_size_max
+        return quantity
+
+    async def _maybe_random_delay(self, context: str):
+        """Introduce randomized delay between actions."""
+        if self.order_delay_min is None or self.order_delay_max is None:
+            return
+        delay = self._rng.uniform(self.order_delay_min, self.order_delay_max)
+        self.logger.info(f"⏳ Random delay before {context}: {delay:.2f}s")
+        await asyncio.sleep(delay)
 
     def handle_lighter_order_result(self, order_data):
         """Handle Lighter order result from WebSocket."""
@@ -531,7 +656,7 @@ class HedgeBot:
         config_dict = {
             'ticker': self.ticker,
             'contract_id': '',  # Will be set when we get contract info
-            'quantity': self.order_quantity,
+            'quantity': self.order_size_max,
             'tick_size': Decimal('0.01'),  # Will be updated when we get contract info
             'close_order_side': 'sell'  # Default, will be updated based on strategy
         }
@@ -581,9 +706,19 @@ class HedgeBot:
 
         contract_id, tick_size = await self.extended_client.get_contract_attributes()
 
-        if self.order_quantity < self.extended_client.config.quantity:
+        min_allowed = getattr(self.extended_client, "min_order_size", None)
+        if min_allowed is None:
+            min_allowed = self.extended_client.config.quantity
+
+        if self.order_size_max < min_allowed:
             raise ValueError(
-                f"Order quantity is less than min quantity: {self.order_quantity} < {self.extended_client.config.quantity}")
+                f"Configured maximum order quantity ({self.order_size_max}) is less than exchange minimum "
+                f"{min_allowed}")
+
+        if self.order_size_min < min_allowed:
+            self.logger.warning(
+                f"⚠️ size-min {self.order_size_min} is below exchange minimum {min_allowed}; clamping to {min_allowed}")
+            self.order_size_min = min_allowed
 
         return contract_id, tick_size
 
@@ -613,26 +748,60 @@ class HedgeBot:
         # Get best bid/ask prices
         best_bid, best_ask = await self.fetch_extended_bbo_prices()
 
-        # Place the order using Extended client
-        order_result = await self.extended_client.place_open_order(
-            contract_id=self.extended_contract_id,
-            quantity=quantity,
-            direction=side.lower()
-        )
+        min_allowed = getattr(self.extended_client, "min_order_size", Decimal('0'))
+        attempt_quantity = quantity
+        reduction_attempts = 0
+        max_reductions = 5
 
-        if order_result.success:
-            return order_result.order_id, order_result.price
-        else:
-            raise Exception(f"Failed to place order: {order_result.error_message}")
+        while reduction_attempts <= max_reductions:
+            # Place the order using Extended client
+            order_result = await self.extended_client.place_open_order(
+                contract_id=self.extended_contract_id,
+                quantity=attempt_quantity,
+                direction=side.lower()
+            )
+
+            if order_result.success:
+                return order_result.order_id, order_result.price, attempt_quantity
+
+            error_message = order_result.error_message or ''
+            lower_error = error_message.lower()
+            if ("cost exceeds available balance" in lower_error or "1140" in lower_error) and reduction_attempts < max_reductions:
+                self.logger.warning(
+                    f"⚠️ Extended rejected size {attempt_quantity} ({error_message}); reducing by 20% and retrying")
+                reduced_quantity = (attempt_quantity * Decimal('0.8')).quantize(self.quantity_precision, rounding=ROUND_DOWN)
+
+                # Ensure reduction actually changes the quantity and stays above minimum
+                if reduced_quantity == attempt_quantity:
+                    reduced_quantity = attempt_quantity - self.quantity_precision
+                    reduced_quantity = reduced_quantity.quantize(self.quantity_precision, rounding=ROUND_DOWN)
+
+                if min_allowed and reduced_quantity < min_allowed:
+                    raise Exception(
+                        f"Insufficient margin even after reductions (min {min_allowed}, attempted {reduced_quantity})")
+                if reduced_quantity <= 0:
+                    raise Exception("Reduced order quantity reached zero; cannot place order")
+
+                attempt_quantity = reduced_quantity
+                reduction_attempts += 1
+                continue
+
+            raise Exception(f"Failed to place order: {error_message}")
+
+        raise Exception("Failed to place order after reducing size due to insufficient balance")
 
     async def place_extended_post_only_order(self, side: str, quantity: Decimal):
         """Place a post-only order on Extended."""
         if not self.extended_client:
             raise Exception("Extended client not initialized")
 
+        quantity = quantity.quantize(self.quantity_precision, rounding=ROUND_DOWN)
         self.extended_order_status = None
-        self.logger.info(f"[OPEN] [Extended] [{side}] Placing Extended POST-ONLY order")
-        order_id, order_price = await self.place_bbo_order(side, quantity)
+        order_id, order_price, placed_quantity = await self.place_bbo_order(side, quantity)
+        if placed_quantity != quantity:
+            self.logger.warning(f"[OPEN] [Extended] [{side}] Adjusted order size from {quantity} to {placed_quantity} due to margin limits")
+        quantity = placed_quantity
+        self.logger.info(f"[OPEN] [Extended] [{side}] Placing Extended POST-ONLY order | quantity: {quantity}")
 
         start_time = time.time()
         last_cancel_time = 0
@@ -641,7 +810,11 @@ class HedgeBot:
             if self.extended_order_status in ['CANCELED', 'CANCELLED']:
                 self.logger.info(f"Order {order_id} was canceled, placing new order")
                 self.extended_order_status = None  # Reset to None to trigger new order
-                order_id, order_price = await self.place_bbo_order(side, quantity)
+                order_id, order_price, placed_quantity = await self.place_bbo_order(side, quantity)
+                if placed_quantity != quantity:
+                    self.logger.warning(f"[RETRY] [Extended] [{side}] Adjusted order size from {quantity} to {placed_quantity} due to margin limits")
+                quantity = placed_quantity
+                self.logger.info(f"[RETRY] [Extended] [{side}] Placing Extended POST-ONLY order | quantity: {quantity}")
                 start_time = time.time()
                 last_cancel_time = 0  # Reset cancel timer
                 await asyncio.sleep(0.5)
@@ -788,15 +961,48 @@ class HedgeBot:
 
         best_bid, best_ask = self.get_lighter_best_levels()
 
+        # Ensure order book data is available before proceeding
+        retries = 0
+        max_retries = 20
+        required_level_missing = (
+            (lighter_side.lower() == 'buy' and best_ask is None) or
+            (lighter_side.lower() == 'sell' and best_bid is None)
+        )
+        while required_level_missing and retries < max_retries and not self.stop_flag:
+            if retries == 0:
+                self.logger.warning("⚠️ Missing Lighter order book best levels, retrying...")
+            await asyncio.sleep(0.1)
+            best_bid, best_ask = self.get_lighter_best_levels()
+            required_level_missing = (
+                (lighter_side.lower() == 'buy' and best_ask is None) or
+                (lighter_side.lower() == 'sell' and best_bid is None)
+            )
+            retries += 1
+
+        if required_level_missing:
+            self.logger.error("❌ Unable to determine Lighter best levels; aborting market order placement")
+            return None
+
+        if self.lighter_quantity_step:
+            quantity = quantity.quantize(self.lighter_quantity_step, rounding=ROUND_DOWN)
+
         # Determine order parameters
         if lighter_side.lower() == 'buy':
             is_ask = False
-            price = best_ask[0] * Decimal('1.002')
+            multiplier, bps_offset = self._choose_lighter_multiplier(lighter_side)
+            raw_price = best_ask[0] * multiplier
         else:
             is_ask = True
-            price = best_bid[0] * Decimal('0.998')
+            multiplier, bps_offset = self._choose_lighter_multiplier(lighter_side)
+            raw_price = best_bid[0] * multiplier
 
-        self.logger.info(f"Placing Lighter market order: {lighter_side} {quantity} | is_ask: {is_ask}")
+        if self.lighter_price_step:
+            price = raw_price.quantize(self.lighter_price_step, rounding=ROUND_DOWN)
+        else:
+            price = raw_price
+
+        self.logger.info(f"Placing Lighter market order: {lighter_side} {quantity} | is_ask: {is_ask} | "
+                         f"hedge offset: {bps_offset} bps | price: {price}")
 
         # Reset order state
         self.lighter_order_filled = False
@@ -915,10 +1121,6 @@ class HedgeBot:
 
                 # Handle the order update
                 if status == 'FILLED':
-                    if side == 'buy':
-                        self.extended_position += filled_size
-                    else:
-                        self.extended_position -= filled_size
                     self.logger.info(f"[{order_id}] [{order_type}] [Extended] [{status}]: {filled_size} @ {price}")
                     self.extended_order_status = status
 
@@ -1040,6 +1242,10 @@ class HedgeBot:
             # Get contract info
             self.extended_contract_id, self.extended_tick_size = await self.get_extended_contract_info()
             self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier = self.get_lighter_market_config()
+            if self.price_multiplier:
+                self.lighter_price_step = Decimal('1') / Decimal(self.price_multiplier)
+            if self.base_amount_multiplier:
+                self.lighter_quantity_step = Decimal('1') / Decimal(self.base_amount_multiplier)
 
             self.logger.info(f"Contract info loaded - Extended: {self.extended_contract_id}, "
                              f"Lighter: {self.lighter_market_index}")
@@ -1105,6 +1311,9 @@ class HedgeBot:
             self.logger.info(f"🔄 Trading loop iteration {iterations}")
             self.logger.info("-----------------------------------------------")
 
+            self.current_cycle_quantity = None
+            self.current_cycle_open_side = None
+
             self.logger.info(f"[STEP 1] Extended position: {self.extended_position} | Lighter position: {self.lighter_position}")
 
             if abs(self.extended_position + self.lighter_position) > 0.2:
@@ -1114,9 +1323,15 @@ class HedgeBot:
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
             try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'buy'
-                await self.place_extended_post_only_order(side, self.order_quantity)
+                if self.direction_mode == 'random':
+                    self.current_cycle_open_side = 'buy' if self._rng.random() < 0.5 else 'sell'
+                else:
+                    self.current_cycle_open_side = self.direction_mode
+                await self._maybe_random_delay(f"placing Extended {self.current_cycle_open_side.upper()} order (step 1)")
+                self.current_cycle_quantity = self._choose_order_quantity()
+                self.logger.info(f"🎯 Step 1 order size selected: {self.current_cycle_quantity} "
+                                 f"({self.current_cycle_open_side})")
+                await self.place_extended_post_only_order(self.current_cycle_open_side, self.current_cycle_quantity)
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1146,9 +1361,18 @@ class HedgeBot:
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
             try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'sell'
-                await self.place_extended_post_only_order(side, self.order_quantity)
+                close_quantity = abs(self.extended_position)
+                if close_quantity == 0:
+                    self.logger.info("No Extended exposure to neutralize in Step 2, skipping order")
+                    self.order_execution_complete = True
+                else:
+                    if self.extended_position > 0:
+                        close_side = 'sell'
+                    else:
+                        close_side = 'buy'
+                    await self._maybe_random_delay(f"placing Extended {close_side.upper()} order (step 2)")
+                    self.logger.info(f"🎯 Step 2 order size selected: {close_quantity} ({close_side})")
+                    await self.place_extended_post_only_order(close_side, close_quantity)
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1182,7 +1406,10 @@ class HedgeBot:
 
             try:
                 # Determine side based on some logic (for now, alternate)
-                await self.place_extended_post_only_order(side, abs(self.extended_position))
+                quantity = abs(self.extended_position)
+                await self._maybe_random_delay(f"placing Extended {side.upper()} order (step 3)")
+                self.logger.info(f"🎯 Step 3 residual order size: {quantity} ({side})")
+                await self.place_extended_post_only_order(side, quantity)
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
