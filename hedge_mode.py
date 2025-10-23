@@ -72,6 +72,10 @@ Examples:
                         help='Maximum markdown in basis points for Lighter hedge sells')
     parser.add_argument('--direction-mode', type=str, choices=['buy', 'sell', 'random'],
                         help='(Extended only) Opening order direction: always buy, always sell, or random')
+    parser.add_argument('--hold-min', type=float,
+                        help='(Extended only) Minimum seconds to keep exposure open before hedging back')
+    parser.add_argument('--hold-max', type=float,
+                        help='(Extended only) Maximum seconds to keep exposure open before hedging back')
     
     return parser.parse_args()
 
@@ -152,6 +156,8 @@ async def main():
                 'lighter_sell_offset_bps_min': Decimal(str(args.sell_offset_bps_min)) if args.sell_offset_bps_min is not None else None,
                 'lighter_sell_offset_bps_max': Decimal(str(args.sell_offset_bps_max)) if args.sell_offset_bps_max is not None else None,
                 'direction_mode': args.direction_mode or 'random',
+                'hold_min': args.hold_min,
+                'hold_max': args.hold_max,
             })
 
         bot = HedgeBotClass(**bot_kwargs)

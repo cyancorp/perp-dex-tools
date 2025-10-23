@@ -300,6 +300,7 @@ python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
 - `--iter`: Number of trading cycles
 - `--fill-timeout`: Maker order fill timeout in seconds (default: 5)
 - `--direction-mode`: (Extended only) Opening direction behaviour: `buy`, `sell`, or `random`
+- `--hold-min` / `--hold-max`: (Extended only) Range in seconds to keep the exposure open before placing the closing leg (set both equal for a fixed hold; default: 0)
 
 ### Extended Hedge Mode Randomization
 
@@ -310,6 +311,7 @@ parameters above. The bot will:
 - sleep a random duration between `--delay-min` and `--delay-max` seconds before each Extended order,
 - jitter the Lighter hedge price within the configured basis-point windows.
 - choose the opening side according to `--direction-mode` (set it to `random` to flip between longs and shorts).
+- optionally hold the open exposure for a random duration between `--hold-min` and `--hold-max` before placing the closing leg to accumulate open interest.
 
 ### Risk Monitoring Utility
 
