@@ -331,7 +331,13 @@ def load_config(path: Path, overrides: Dict[str, Any]) -> List[BotConfig]:
     return configs
 
 
-async def run_manager(config_path: Path, poll_interval: int, overrides: Dict[str, Any], run_once: bool) -> None:
+async def run_manager(
+    config_path: Path,
+    poll_interval: int,
+    overrides: Dict[str, Any],
+    run_once: bool,
+    stop_event: asyncio.Event,
+) -> None:
     configs = load_config(config_path, overrides)
     if not configs:
         LOGGER.warning("No bots defined in config %s", config_path)
@@ -359,6 +365,10 @@ async def run_manager(config_path: Path, poll_interval: int, overrides: Dict[str
         states.append(state)
     try:
         while True:
+            if stop_event.is_set():
+                LOGGER.info("Stop signal received; exiting manager loop")
+                break
+
             now = datetime.now(timezone.utc)
             for state in states:
                 try:
@@ -370,7 +380,6 @@ async def run_manager(config_path: Path, poll_interval: int, overrides: Dict[str
                         token=state.config.alerts_token,
                         chat_id=state.config.alerts_chat_id,
                     )
-            await asyncio.sleep(poll_interval)
 
             if run_once:
                 all_done = all((st.completed or not st.process) for st in states)
@@ -378,6 +387,11 @@ async def run_manager(config_path: Path, poll_interval: int, overrides: Dict[str
                 if all_done and not any_running:
                     LOGGER.info("All bots completed run-once execution; exiting manager loop")
                     break
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
+            except asyncio.TimeoutError:
+                continue
     except asyncio.CancelledError:  # pragma: no cover - shutdown path
         LOGGER.info("Manager loop cancelled")
     finally:
@@ -407,7 +421,32 @@ def main() -> None:
     if not config_path.exists():
         raise SystemExit(f"Config file not found: {config_path}")
 
-    asyncio.run(run_manager(config_path, args.poll_interval, overrides, args.run_once))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    stop_event = asyncio.Event()
+
+    def _handle_signal(signum):
+        LOGGER.info("Received signal %s; shutting down", signum)
+        stop_event.set()
+
+    handlers = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _handle_signal, sig)
+            handlers.append(sig)
+        except (NotImplementedError, RuntimeError):
+            signal.signal(sig, lambda s, f, sig=sig: loop.call_soon_threadsafe(stop_event.set))
+
+    try:
+        loop.run_until_complete(run_manager(config_path, args.poll_interval, overrides, args.run_once, stop_event))
+    finally:
+        for sig in handlers:
+            try:
+                loop.remove_signal_handler(sig)
+            except Exception:
+                pass
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 if __name__ == "__main__":
