@@ -72,6 +72,8 @@ bots:
    - Send Telegram alert on: start success, unexpected exit (with reason), repeated restarts, manual disable.
    - Include key metadata: bot name, ticker, exit code, last log lines, hedge latency metrics (if available).
 
+   When debugging, launch the manager with `--run-once` so clean exits (e.g. `--iter 1`) do not restart immediately.
+
 4. **Error propagation**
    - The wrapped bot should exit non-zero (or emit a dedicated exit file) when it detects irrecoverable risk. The wrapper should treat those as hard stops, alert, and skip restart until manual intervention.
 

@@ -8,7 +8,7 @@ import logging
 import os
 import signal
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -63,9 +63,11 @@ class BotState:
     restart_backoff: int = 30
     last_exit_code: Optional[int] = None
     task: Optional[asyncio.Task] = None
+    restart_on_completion: bool = True
+    completed: bool = False
 
     async def start(self) -> None:
-        if self.process:
+        if self.process or self.completed:
             return
 
         cmd = [
@@ -107,6 +109,7 @@ class BotState:
         )
         self.log_file = log_handle
         self.stopping = False
+        self.completed = False
         self.task = asyncio.create_task(self._watch_process())
         await send_telegram_message(
             f"[manager] Started bot {self.config.name}",
@@ -161,6 +164,12 @@ class BotState:
             self.restart_backoff = 30
             return
 
+        if returncode == 0 and not self.restart_on_completion:
+            self.completed = True
+            self.restart_backoff = 30
+            LOGGER.info("Bot %s completed execution (run-once mode)", self.config.name)
+            return
+
         await send_telegram_message(
             f"[manager] Bot {self.config.name} exited unexpectedly (code {returncode}); restarting after {self.restart_backoff}s",
             token=self.config.alerts_token,
@@ -178,9 +187,43 @@ class BotState:
         else:
             if self.process:
                 await self.stop("schedule")
+            self.completed = False
 
 
-def load_config(path: Path) -> List[BotConfig]:
+def convert_override_value(raw: str):
+    lowered = raw.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        if "." in raw:
+            return float(raw)
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def parse_cli_overrides(extra: List[str]) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
+    i = 0
+    while i < len(extra):
+        token = extra[i]
+        if not token.startswith("--"):
+            raise SystemExit(f"Unexpected argument: {token}")
+        key = token[2:]
+        value: Any = True
+        if "=" in key:
+            key, raw_value = key.split("=", 1)
+            value = convert_override_value(raw_value)
+        else:
+            if i + 1 < len(extra) and not extra[i + 1].startswith("--"):
+                i += 1
+                value = convert_override_value(extra[i])
+        overrides[key.replace("_", "-")] = value
+        i += 1
+    return overrides
+
+
+def load_config(path: Path, overrides: Dict[str, Any]) -> List[BotConfig]:
     with open(path, "r", encoding="utf-8") as fh:
         if path.suffix in {".yaml", ".yml"}:
             if yaml is None:
@@ -189,7 +232,7 @@ def load_config(path: Path) -> List[BotConfig]:
         else:
             raw = json.load(fh)
 
-    global_cli_args = raw.get("cli_args", {}) or {}
+    global_cli_args = dict(raw.get("cli_args", {}) or {})
     bots_cfg = raw.get("bots", [])
     configs: List[BotConfig] = []
     for entry in bots_cfg:
@@ -200,6 +243,7 @@ def load_config(path: Path) -> List[BotConfig]:
         schedule = ScheduleWindow.from_strings(schedule_cfg["start"], schedule_cfg["stop"])
         cli_args = dict(global_cli_args)
         cli_args.update(entry.get("cli_args", {}))
+        cli_args.update(overrides)
         env_vars = entry.get("env", {})
         alerts = entry.get("alerts", {})
         configs.append(
@@ -216,16 +260,16 @@ def load_config(path: Path) -> List[BotConfig]:
     return configs
 
 
-async def run_manager(config_path: Path, poll_interval: int) -> None:
-    configs = load_config(config_path)
+async def run_manager(config_path: Path, poll_interval: int, overrides: Dict[str, Any], run_once: bool) -> None:
+    configs = load_config(config_path, overrides)
     if not configs:
         LOGGER.warning("No bots defined in config %s", config_path)
         return
 
-    states = [BotState(cfg) for cfg in configs]
+    states = [BotState(cfg, restart_on_completion=not run_once) for cfg in configs]
     try:
         while True:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             for state in states:
                 try:
                     await state.ensure_state(now)
@@ -237,6 +281,13 @@ async def run_manager(config_path: Path, poll_interval: int) -> None:
                         chat_id=state.config.alerts_chat_id,
                     )
             await asyncio.sleep(poll_interval)
+
+            if run_once:
+                all_done = all((st.completed or not st.process) for st in states)
+                any_running = any(st.process for st in states)
+                if all_done and not any_running:
+                    LOGGER.info("All bots completed run-once execution; exiting manager loop")
+                    break
     except asyncio.CancelledError:  # pragma: no cover - shutdown path
         LOGGER.info("Manager loop cancelled")
     finally:
@@ -245,16 +296,19 @@ async def run_manager(config_path: Path, poll_interval: int) -> None:
                 await state.stop("shutdown")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args() -> (argparse.Namespace, Dict[str, Any]):
     parser = argparse.ArgumentParser(description="Hedge bot orchestrator")
     parser.add_argument("--config", required=True, help="Path to orchestration config (YAML or JSON)")
     parser.add_argument("--poll-interval", type=int, default=30, help="Scheduler tick in seconds (default: 30)")
     parser.add_argument("--log-level", default="INFO", help="Logging level (default: INFO)")
-    return parser.parse_args()
+    parser.add_argument("--run-once", action="store_true", help="Do not restart bots automatically on clean exit")
+    args, unknown = parser.parse_known_args()
+    overrides = parse_cli_overrides(unknown)
+    return args, overrides
 
 
 def main() -> None:
-    args = parse_args()
+    args, overrides = parse_args()
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -263,7 +317,7 @@ def main() -> None:
     if not config_path.exists():
         raise SystemExit(f"Config file not found: {config_path}")
 
-    asyncio.run(run_manager(config_path, args.poll_interval))
+    asyncio.run(run_manager(config_path, args.poll_interval, overrides, args.run_once))
 
 
 if __name__ == "__main__":
