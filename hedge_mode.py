@@ -78,6 +78,8 @@ Examples:
                         help='(Extended only) Maximum seconds to keep exposure open before hedging back')
     parser.add_argument('--bot-name', type=str,
                         help='Identifier used in alerts/logs for this bot')
+    parser.add_argument('--metrics-port', type=int,
+                        help='Optional port to expose Prometheus metrics (Extended only)')
     
     return parser.parse_args()
 
@@ -161,6 +163,7 @@ async def main():
                 'direction_mode': args.direction_mode or 'random',
                 'hold_min': args.hold_min,
                 'hold_max': args.hold_max,
+                'metrics_port': args.metrics_port,
             })
 
         bot = HedgeBotClass(**bot_kwargs)

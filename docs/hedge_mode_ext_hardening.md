@@ -131,6 +131,8 @@ This document lists the key production hardening gaps observed in `hedge/hedge_m
 - **Problem**  
   - Random delays of 15–60 seconds run even when we hold open exposure (`_maybe_random_delay`, called in Steps 2 & 3). This increases directional risk.  
   - Delays should apply only to neutral states (e.g., Step 1 before opening).
+- **Status**  
+  - ✅ Implemented — `_maybe_random_delay` now skips whenever net exposure is non-flat, removing long pauses while hedges are outstanding (`hedge/hedge_mode_ext.py`).
 - **Implementation Outline**  
   - Gate `_maybe_random_delay` so it runs only when both positions are ~0.  
   - Or introduce shorter max delays while exposed (e.g., clamp to 1–2 seconds) controlled by new config flags.
@@ -153,6 +155,8 @@ This document lists the key production hardening gaps observed in `hedge/hedge_m
 
 ### 7. Structured Metrics & Health Checks
 - Emit Prometheus-style metrics for position, hedge latency, failure counts.  
+- **Status**  
+  - ✅ Implemented — Prometheus metrics facade added (`helpers/metrics.py`) and wired into the Extended hedge bot for positions, latency timing, iteration counts, and failure tracking (exposed via `--metrics-port` or `HEDGE_METRICS_PORT`).
 - Implementation: integrate `prometheus_client` or lightweight HTTP server; update counters when trades/log events fire.
 
 ### 8. Config-Driven Risk Limits
