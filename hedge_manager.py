@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 from dataclasses import dataclass, field
 from datetime import datetime, time, timezone
@@ -26,6 +27,8 @@ COLOR_PALETTE = [
     "\033[35m",  # magenta
     "\033[36m",  # cyan
 ]
+
+ITERATION_RE = re.compile(r"Trading loop iteration (\\d+)")
 
 try:
     import yaml  # type: ignore
@@ -77,10 +80,30 @@ class BotState:
     restart_on_completion: bool = True
     completed: bool = False
     color: str = ANSI_WHITE
+    base_cli_args: Dict[str, Any] = field(default_factory=dict)
+    total_iterations_goal: Optional[int] = None
+    remaining_iterations: Optional[int] = None
+    base_iter: int = 1
+    iterations_planned_current: int = 0
+    iterations_completed_current: int = 0
+    iterations_completed_prior: int = 0
 
     async def start(self) -> None:
         if self.process or self.completed:
             return
+
+        cli_args = dict(self.base_cli_args)
+        if self.total_iterations_goal is not None:
+            remaining = self.remaining_iterations if self.remaining_iterations is not None else self.total_iterations_goal
+            planned = max(1, min(self.base_iter, remaining))
+            self.iterations_planned_current = planned
+            self.remaining_iterations = max(0, remaining - planned)
+            cli_args["iter"] = planned
+        else:
+            planned = int(cli_args.get("iter", self.base_iter))
+            self.iterations_planned_current = planned
+
+        self.iterations_completed_current = 0
 
         cmd = [
             "uv",
@@ -88,7 +111,7 @@ class BotState:
             "hedge_mode.py",
         ]
 
-        for key, value in self.config.cli_args.items():
+        for key, value in cli_args.items():
             if value is None:
                 continue
             flag = f"--{key.replace('_', '-')}"
@@ -169,16 +192,22 @@ class BotState:
         assert self.process is not None
         if not self.process.stdout:
             return
-        log_dir = Path("logs") / self.config.name
-        log_path = log_dir / "manager.log"
         while True:
             line = await self.process.stdout.readline()
             if not line:
                 break
             decoded = line.decode(errors="replace").rstrip()
             LOGGER.info("%s[%s] %s%s", self.color, self.config.name, decoded, ANSI_RESET)
-            with open(log_path, "a", encoding="utf-8") as fh:
-                fh.write(decoded + "\n")
+            if self.log_file:
+                self.log_file.write(decoded + "\n")
+                self.log_file.flush()
+            match = ITERATION_RE.search(decoded)
+            if match:
+                try:
+                    iteration_number = int(match.group(1))
+                    self.iterations_completed_current = max(self.iterations_completed_current, iteration_number)
+                except ValueError:
+                    pass
 
     async def _watch_process(self) -> None:
         assert self.process is not None
@@ -187,9 +216,23 @@ class BotState:
         LOGGER.info("%sBot %s exited with code %s%s", self.color, self.config.name, returncode, ANSI_RESET)
         await self._finalise_process()
 
+        if self.total_iterations_goal is not None:
+            actual = min(self.iterations_planned_current, self.iterations_completed_current)
+            deficit = max(0, self.iterations_planned_current - actual)
+            self.iterations_completed_prior += actual
+            if self.remaining_iterations is not None:
+                self.remaining_iterations += deficit
+            if self.iterations_completed_prior >= self.total_iterations_goal:
+                self.completed = True
+
         if self.stopping:
             self.stopping = False
             self.restart_backoff = 30
+            return
+
+        if self.completed and self.total_iterations_goal is not None:
+            self.restart_backoff = 30
+            LOGGER.info("%sBot %s completed total iterations (%s)%s", self.color, self.config.name, self.total_iterations_goal, ANSI_RESET)
             return
 
         if returncode == 0 and not self.restart_on_completion:
@@ -297,7 +340,23 @@ async def run_manager(config_path: Path, poll_interval: int, overrides: Dict[str
     states = []
     for idx, cfg in enumerate(configs):
         color = COLOR_PALETTE[idx % len(COLOR_PALETTE)]
-        states.append(BotState(cfg, restart_on_completion=not run_once, color=color))
+        state = BotState(cfg, restart_on_completion=not run_once, color=color, base_cli_args=dict(cfg.cli_args))
+        iter_value = state.base_cli_args.get("iter")
+        if iter_value is not None:
+            try:
+                state.base_iter = max(1, int(iter_value))
+            except ValueError:
+                state.base_iter = 1
+            state.total_iterations_goal = state.base_iter
+            state.remaining_iterations = state.base_iter
+        else:
+            state.base_iter = 1
+            state.total_iterations_goal = None
+            state.remaining_iterations = None
+        state.iterations_completed_prior = 0
+        state.iterations_planned_current = 0
+        state.iterations_completed_current = 0
+        states.append(state)
     try:
         while True:
             now = datetime.now(timezone.utc)
