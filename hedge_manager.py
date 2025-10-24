@@ -92,8 +92,10 @@ class BotState:
         if self.config.env_vars:
             expanded = {k: os.path.expandvars(str(v)) for k, v in self.config.env_vars.items()}
             env.update(expanded)
-        log_path = Path("logs") / f"manager_{self.config.name}.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        log_dir = Path("logs") / self.config.name
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "manager.log"
         log_handle = open(log_path, "a", buffering=1)
 
         self.process = await asyncio.create_subprocess_exec(
@@ -187,6 +189,7 @@ def load_config(path: Path) -> List[BotConfig]:
         else:
             raw = json.load(fh)
 
+    global_cli_args = raw.get("cli_args", {}) or {}
     bots_cfg = raw.get("bots", [])
     configs: List[BotConfig] = []
     for entry in bots_cfg:
@@ -195,7 +198,8 @@ def load_config(path: Path) -> List[BotConfig]:
         env_file = Path(env_file_value).expanduser() if env_file_value else None
         schedule_cfg = entry["schedule"]
         schedule = ScheduleWindow.from_strings(schedule_cfg["start"], schedule_cfg["stop"])
-        cli_args = entry.get("cli_args", {})
+        cli_args = dict(global_cli_args)
+        cli_args.update(entry.get("cli_args", {}))
         env_vars = entry.get("env", {})
         alerts = entry.get("alerts", {})
         configs.append(

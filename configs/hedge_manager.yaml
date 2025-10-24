@@ -1,23 +1,23 @@
+cli_args:
+  exchange: extended
+  size: 1
+  iter: 20
+  fill-timeout: 5
 bots:
   - name: sol_main
     env:
-      # Lighter Configuration
       API_KEY_PRIVATE_KEY: 0x2d370e3f75c660c239e28168f54beec78a55859c9db7aa0c69eca133b4555f40c7fc0e9185506139
       LIGHTER_ACCOUNT_INDEX: 287135
       LIGHTER_API_KEY_INDEX: 3
       EXTENDED_API_KEY: 8fb3ac5408028281c1fda9c11ec73c88
       EXTENDED_STARK_KEY_PUBLIC: 0x1d388db89509e74a92779c131ad5862e710e1edc5420989f0abda7edecd11b7
       EXTENDED_STARK_KEY_PRIVATE: 0x6f25cd41069f0c40ef611ed8b81906a20cebadc14aae4db20026ce5670503a4
-      EXTENDED_VAULT: 221266 
+      EXTENDED_VAULT: 221266
     schedule:
       start: "00:00"
       stop: "23:59"
     cli_args:
-      exchange: extended
       ticker: SOL
-      size: 1
-      iter: 20
-      fill-timeout: 5
       size-min: 0.2
       size-max: 0.3
       size-step: 0.01

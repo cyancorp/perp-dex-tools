@@ -58,6 +58,7 @@ class HedgeBot:
             direction_mode: str = 'random',
             hold_min: Optional[float] = None,
             hold_max: Optional[float] = None,
+            bot_name: Optional[str] = None,
     ):
         self.ticker = ticker
         self.order_quantity = order_quantity
@@ -84,6 +85,11 @@ class HedgeBot:
             raise ValueError("Hold duration bounds must be non-negative")
         if self.hold_max < self.hold_min:
             raise ValueError("hold_max cannot be less than hold_min")
+        self.bot_name = bot_name or os.getenv("HEDGE_BOT_NAME") or f"hedge-{self.ticker}"
+        self.extended_volume_base = Decimal('0')
+        self.extended_volume_notional = Decimal('0')
+        self.last_cycle_open_quantity: Optional[Decimal] = None
+        self.last_hold_duration: float = 0.0
 
         # Randomization configuration
         self._rng = random.SystemRandom()
@@ -480,6 +486,7 @@ class HedgeBot:
         if duration <= 0:
             return
         self.logger.info(f"⏸️ Holding exposure for {duration:.2f}s ({context})")
+        self.last_hold_duration = duration
         deadline = time.monotonic() + duration
         while not self.stop_flag and time.monotonic() < deadline:
             await asyncio.sleep(min(1.0, deadline - time.monotonic()))
@@ -491,6 +498,21 @@ class HedgeBot:
                 if self.stop_flag:
                     break
         self.logger.info(f"▶️ Hold complete ({context})")
+
+    async def _send_iteration_summary(self, iteration_number: int):
+        if not os.getenv("TELEGRAM_BOT_TOKEN") or not os.getenv("TELEGRAM_CHAT_ID"):
+            return
+
+        message = (
+            f"[{self.bot_name}] Iteration {iteration_number} complete\n"
+            f"Open size: {self.last_cycle_open_quantity or Decimal('0')}\n"
+            f"Total volume: {self.extended_volume_base} (notional {self.extended_volume_notional})\n"
+            f"Last hold: {self.last_hold_duration:.2f}s"
+        )
+        try:
+            await send_telegram_message(message)
+        except Exception as exc:
+            self.logger.error(f"⚠️ Failed to send iteration summary: {exc}")
 
     def handle_lighter_order_result(self, order_data):
         """Handle Lighter order result from WebSocket."""
@@ -1601,6 +1623,10 @@ class HedgeBot:
                 self.extended_order_fills[order_id] = filled_size
 
                 if delta_fill > 0:
+                    price_decimal = Decimal(price)
+                    volume_delta = abs(delta_fill)
+                    self.extended_volume_base += volume_delta
+                    self.extended_volume_notional += volume_delta * abs(price_decimal)
                     self._schedule_trade_log(
                         exchange='Extended',
                         side=side,
@@ -1818,6 +1844,7 @@ class HedgeBot:
 
             self.current_cycle_quantity = None
             self.current_cycle_open_side = None
+            self.last_hold_duration = 0.0
 
             self.logger.info(f"[STEP 1] Extended position: {self.extended_position} | Lighter position: {self.lighter_position}")
 
@@ -1830,6 +1857,7 @@ class HedgeBot:
                     self.current_cycle_open_side = self.direction_mode
                 await self._maybe_random_delay(f"placing Extended {self.current_cycle_open_side.upper()} order (step 1)")
                 self.current_cycle_quantity = self._choose_order_quantity()
+                self.last_cycle_open_quantity = self.current_cycle_quantity
                 self.logger.info(f"🎯 Step 1 order size selected: {self.current_cycle_quantity} "
                                  f"({self.current_cycle_open_side})")
                 await self._ensure_balanced_positions(
@@ -1858,6 +1886,9 @@ class HedgeBot:
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
+
+            if not self.stop_flag and not self.last_exception:
+                asyncio.create_task(self._send_iteration_summary(iterations))
 
             if self.stop_flag:
                 break

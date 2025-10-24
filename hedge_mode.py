@@ -76,6 +76,8 @@ Examples:
                         help='(Extended only) Minimum seconds to keep exposure open before hedging back')
     parser.add_argument('--hold-max', type=float,
                         help='(Extended only) Maximum seconds to keep exposure open before hedging back')
+    parser.add_argument('--bot-name', type=str,
+                        help='Identifier used in alerts/logs for this bot')
     
     return parser.parse_args()
 
@@ -141,7 +143,8 @@ async def main():
             'ticker': args.ticker.upper(),
             'order_quantity': Decimal(args.size),
             'fill_timeout': args.fill_timeout,
-            'iterations': args.iter
+            'iterations': args.iter,
+            'bot_name': args.bot_name
         }
 
         if args.exchange.lower() == 'extended':

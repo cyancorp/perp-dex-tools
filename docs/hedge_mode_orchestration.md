@@ -12,19 +12,27 @@ This document captures the requirements and design considerations for a future "
 
 ### Configuration Design
 
-Use a single orchestration config file (YAML/JSON) that defines an array of bot jobs. Each entry should contain:
+Use a single orchestration config file (YAML/JSON) that defines an array of bot jobs. Top-level options can include:
+
+- `cli_args` (optional): shared command-line arguments applied to every bot.
+
+Each bot entry should contain:
 
 - `name`: human-readable label for logging/alerts.
-- `exchange`: currently `extended`.
 - `env` (optional): mapping of environment variables (API keys, secrets, etc.) to inject for this bot. Values support `${VAR}` expansion.
 - `env_file` (optional): path to a `.env` file if you prefer to keep credentials there. If both `env_file` and `env` are provided, their values are merged, with explicit `env` keys taking precedence.
 - `schedule`: cron-like window (start/end UTC or repeated intervals).
-- `cli_args`: hedge-mode arguments (`--ticker`, `--size-min`, etc.).
+- `cli_args`: hedge-mode arguments (`--ticker`, `--size-min`, etc.) that override the global defaults when provided.
 - `alerts`: overrides for Telegram chat ID or severity thresholds (optional).
 
 Example (YAML):
 
 ```yaml
+cli_args:
+  exchange: extended
+  size: 1
+  iter: 40
+  fill_timeout: 5
 bots:
   - name: sol_wallet_a
     env:
@@ -39,15 +47,12 @@ bots:
       start: "00:05"   # UTC
       stop:  "06:55"
     cli_args:
-      exchange: extended
       ticker: SOL
-      iter: 40
       size_min: 1.5
       size_max: 2.0
       size_step: 0.01
       delay_min: 15
       delay_max: 60
-      fill_timeout: 5
 ```
 
 ### Supervisor Responsibilities
