@@ -28,7 +28,7 @@ COLOR_PALETTE = [
     "\033[36m",  # cyan
 ]
 
-ITERATION_RE = re.compile(r"Trading loop iteration (\\d+)")
+ITERATION_RE = re.compile(r"(?:Trading loop iteration|iteration_start) (\\d+)")
 
 try:
     import yaml  # type: ignore

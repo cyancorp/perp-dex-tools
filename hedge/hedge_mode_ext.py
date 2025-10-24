@@ -88,6 +88,8 @@ class HedgeBot:
         self.bot_name = bot_name or os.getenv("HEDGE_BOT_NAME") or f"hedge-{self.ticker}"
         self.extended_volume_base = Decimal('0')
         self.extended_volume_notional = Decimal('0')
+        self.lighter_volume_base = Decimal('0')
+        self.lighter_volume_notional = Decimal('0')
         self.last_cycle_open_quantity: Optional[Decimal] = None
         self.last_hold_duration: float = 0.0
 
@@ -368,7 +370,7 @@ class HedgeBot:
                 for trade in trades_resp.data:
                     try:
                         if trade.market == self.extended_contract_id:
-                            size = Decimal(str(trade.base_amount)) if hasattr(trade, 'base_amount') else Decimal(str(trade.size))
+                            size = Decimal(str(trade.qty))
                             price = Decimal(str(trade.price))
                             total_size += abs(size)
                             total_notional += abs(size * price)
@@ -376,6 +378,9 @@ class HedgeBot:
                         continue
         except Exception as exc:
             self.logger.error(f"⚠️ Failed to fetch Extended trade history: {exc}")
+
+        if total_size == 0 and self.extended_volume_base > 0:
+            return self.extended_volume_base, self.extended_volume_notional
 
         return total_size, total_notional
 
@@ -404,6 +409,9 @@ class HedgeBot:
                             continue
         except Exception as exc:
             self.logger.error(f"⚠️ Failed to fetch Lighter trade history: {exc}")
+
+        if total_size == 0 and self.lighter_volume_base > 0:
+            return self.lighter_volume_base, self.lighter_volume_notional
 
         return total_size, total_notional
 
@@ -582,6 +590,14 @@ class HedgeBot:
             else:
                 order_data["side"] = "LONG"
                 self.lighter_position += Decimal(order_data["filled_base_amount"])
+
+            try:
+                base_amt = Decimal(order_data['filled_base_amount'])
+                avg_price = Decimal(order_data['avg_filled_price'])
+                self.lighter_volume_base += abs(base_amt)
+                self.lighter_volume_notional += abs(base_amt * avg_price)
+            except Exception:
+                pass
 
             self.logger.info(f"📊 Lighter order filled: {order_data['side']} "
                              f"{order_data['filled_base_amount']} @ {order_data['avg_filled_price']}")
