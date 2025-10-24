@@ -116,3 +116,23 @@ bots:
 1. Extend the manager with health probes (latency, PnL) and expose metrics for monitoring dashboards.
 2. Add integration tests: simulate bot crash (non-zero exit), ensure wrapper restarts and Telegram alert fires.
 3. Support richer scheduling (cron expressions, blackout periods) and per-bot concurrency limits.
+
+### Debugging checklist
+
+1. **Single-pass run** – Use `--run-once` plus `--iter 1` to perform exactly one cycle:
+   ```bash
+   uv run python hedge_manager.py \
+     --config configs/hedge_manager.yaml \
+     --poll-interval 10 \
+     --run-once \
+     --iter 1
+   ```
+   You’ll see “Bot … completed execution (run-once mode)” followed by “All bots completed run-once execution; exiting”. No restarts occur.
+
+2. **Coloured stdout** – Each bot’s stdout/stderr is streamed in a different ANSI colour; manager logs stay white. Full logs are still written under `logs/<bot>/manager.log`.
+
+3. **Process hygiene** – After manual tests, verify no `hedge_mode.py` processes are left suspended (`ps aux | grep hedge_mode | grep -v grep`). The manager sends SIGINT→SIGTERM→SIGKILL when stopping, but stand-alone `uv run hedge_mode.py` sessions should be checked.
+
+4. **Credential integrity** – YAML credentials must remain quoted strings (`"0x…"`). Unquoted values lose their `0x` prefix, leading to “invalid private key length” on startup.
+
+5. **Return to continuous mode** – Remove `--run-once` and set `--iter` (or config default) to your desired cycle length; the manager will now relaunch bots automatically after each clean exit.
