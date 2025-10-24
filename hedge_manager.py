@@ -16,6 +16,17 @@ from dotenv import dotenv_values
 
 from helpers.alerting import send_telegram_message
 
+ANSI_RESET = "\033[0m"
+ANSI_WHITE = "\033[37m"
+COLOR_PALETTE = [
+    "\033[31m",  # red
+    "\033[32m",  # green
+    "\033[33m",  # yellow
+    "\033[34m",  # blue
+    "\033[35m",  # magenta
+    "\033[36m",  # cyan
+]
+
 try:
     import yaml  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -65,6 +76,7 @@ class BotState:
     task: Optional[asyncio.Task] = None
     restart_on_completion: bool = True
     completed: bool = False
+    color: str = ANSI_WHITE
 
     async def start(self) -> None:
         if self.process or self.completed:
@@ -86,7 +98,7 @@ class BotState:
                 continue
             cmd.extend([flag, str(value)])
 
-        LOGGER.info("Starting bot %s with command: %s", self.config.name, " ".join(cmd))
+        LOGGER.info("%sStarting bot %s with command: %s%s", self.color, self.config.name, " ".join(cmd), ANSI_RESET)
 
         env = os.environ.copy()
         if self.config.env_file:
@@ -102,8 +114,8 @@ class BotState:
 
         self.process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=log_handle,
-            stderr=log_handle,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
             cwd=str(Path(__file__).resolve().parent),
             env=env,
         )
@@ -111,6 +123,7 @@ class BotState:
         self.stopping = False
         self.completed = False
         self.task = asyncio.create_task(self._watch_process())
+        asyncio.create_task(self._stream_output())
         await send_telegram_message(
             f"[manager] Started bot {self.config.name}",
             token=self.config.alerts_token,
@@ -152,11 +165,26 @@ class BotState:
             self.task.cancel()
         self.task = None
 
+    async def _stream_output(self) -> None:
+        assert self.process is not None
+        if not self.process.stdout:
+            return
+        log_dir = Path("logs") / self.config.name
+        log_path = log_dir / "manager.log"
+        while True:
+            line = await self.process.stdout.readline()
+            if not line:
+                break
+            decoded = line.decode(errors="replace").rstrip()
+            LOGGER.info("%s[%s] %s%s", self.color, self.config.name, decoded, ANSI_RESET)
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(decoded + "\n")
+
     async def _watch_process(self) -> None:
         assert self.process is not None
         returncode = await self.process.wait()
         self.last_exit_code = returncode
-        LOGGER.info("Bot %s exited with code %s", self.config.name, returncode)
+        LOGGER.info("%sBot %s exited with code %s%s", self.color, self.config.name, returncode, ANSI_RESET)
         await self._finalise_process()
 
         if self.stopping:
@@ -266,7 +294,10 @@ async def run_manager(config_path: Path, poll_interval: int, overrides: Dict[str
         LOGGER.warning("No bots defined in config %s", config_path)
         return
 
-    states = [BotState(cfg, restart_on_completion=not run_once) for cfg in configs]
+    states = []
+    for idx, cfg in enumerate(configs):
+        color = COLOR_PALETTE[idx % len(COLOR_PALETTE)]
+        states.append(BotState(cfg, restart_on_completion=not run_once, color=color))
     try:
         while True:
             now = datetime.now(timezone.utc)
