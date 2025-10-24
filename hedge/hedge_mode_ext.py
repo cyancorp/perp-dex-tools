@@ -354,6 +354,59 @@ class HedgeBot:
             self._write_trade_to_csv(exchange, side, price, quantity)
             self.logger.info(f"📊 Trade logged to CSV: {exchange} {side} {quantity} @ {price}")
 
+    async def _fetch_extended_exchange_volume(self) -> Tuple[Decimal, Decimal]:
+        if not self.extended_client:
+            raise Exception("Extended client not initialized")
+
+        total_size = Decimal('0')
+        total_notional = Decimal('0')
+
+        try:
+            client = self.extended_client.perpetual_trading_client
+            trades_resp = await client.account.get_trades(market_names=[self.extended_contract_id])
+            if trades_resp.status == ResponseStatus.OK and trades_resp.data:
+                for trade in trades_resp.data:
+                    try:
+                        if trade.market == self.extended_contract_id:
+                            size = Decimal(str(trade.base_amount)) if hasattr(trade, 'base_amount') else Decimal(str(trade.size))
+                            price = Decimal(str(trade.price))
+                            total_size += abs(size)
+                            total_notional += abs(size * price)
+                    except Exception:
+                        continue
+        except Exception as exc:
+            self.logger.error(f"⚠️ Failed to fetch Extended trade history: {exc}")
+
+        return total_size, total_notional
+
+    async def _fetch_lighter_exchange_volume(self) -> Tuple[Decimal, Decimal]:
+        if not self.lighter_client:
+            raise Exception("Lighter client not initialized")
+
+        total_size = Decimal('0')
+        total_notional = Decimal('0')
+
+        try:
+            account_api = lighter.AccountApi(self.lighter_client.api_client)
+            account_resp = await account_api.account(by="index", value=str(self.account_index))
+            if account_resp and account_resp.accounts:
+                account = account_resp.accounts[0]
+                trades = getattr(account, "trades", None)
+                if trades:
+                    for trade in trades:
+                        try:
+                            if trade.market_id == self.lighter_market_index:
+                                size = Decimal(str(trade.base_amount))
+                                price = Decimal(str(trade.price))
+                                total_size += abs(size)
+                                total_notional += abs(size * price)
+                        except Exception:
+                            continue
+        except Exception as exc:
+            self.logger.error(f"⚠️ Failed to fetch Lighter trade history: {exc}")
+
+        return total_size, total_notional
+
     def _random_bps(self, minimum: Decimal, maximum: Decimal) -> Decimal:
         """Select a random basis-point value within range."""
         if minimum == maximum:
@@ -503,11 +556,15 @@ class HedgeBot:
         if not os.getenv("TELEGRAM_BOT_TOKEN") or not os.getenv("TELEGRAM_CHAT_ID"):
             return
 
+        ext_size, ext_notional = await self._fetch_extended_exchange_volume()
+        light_size, light_notional = await self._fetch_lighter_exchange_volume()
+
         message = (
             f"[{self.bot_name}] Iteration {iteration_number} complete\n"
             f"Open size: {self.last_cycle_open_quantity or Decimal('0')}\n"
-            f"Total volume: {self.extended_volume_base} (notional {self.extended_volume_notional})\n"
-            f"Last hold: {self.last_hold_duration:.2f}s"
+            f"Hold duration: {self.last_hold_duration:.2f}s\n"
+            f"Extended volume: {ext_size} (notional {ext_notional})\n"
+            f"Lighter volume: {light_size} (notional {light_notional})"
         )
         try:
             await send_telegram_message(message)
@@ -1833,6 +1890,8 @@ class HedgeBot:
                 await self.reconcile_positions(f"iteration_{iterations}_start")
             except Exception as reconcile_error:
                 self.logger.error(f"⚠️ Failed to reconcile positions at iteration start: {reconcile_error}")
+
+            self.logger.info(f"🚩 iteration_start {iterations}")
 
             if not await self._ensure_balanced_positions(f"iteration_{iterations}_start"):
                 if self.last_exception:
