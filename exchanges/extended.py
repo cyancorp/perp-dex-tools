@@ -154,9 +154,18 @@ class ExtendedClient(BaseExchangeClient):
             self.logger.log("Streams stopped", "INFO")
             
             # 2. Close the main client connection if it exists
-            if hasattr(self, 'client') and self.perpetual_trading_client:
+            if self.perpetual_trading_client:
                 try:
                     await self.perpetual_trading_client.close()
+                    # Ensure any remaining module sessions are released
+                    try:
+                        await self.perpetual_trading_client.info.close_session()
+                    except Exception:
+                        pass
+                    try:
+                        await self.perpetual_trading_client.testnet.close_session()
+                    except Exception:
+                        pass
                     self.logger.log("Main client connection closed", "INFO")
                 except Exception as e:
                     self.logger.log(f"Error closing main client: {e}", "WARNING")

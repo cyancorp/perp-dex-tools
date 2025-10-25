@@ -155,8 +155,6 @@ This document lists the key production hardening gaps observed in `hedge/hedge_m
 
 ### 7. Structured Metrics & Health Checks
 - Emit Prometheus-style metrics for position, hedge latency, failure counts.  
-- **Status**  
-  - ✅ Implemented — Prometheus metrics facade added (`helpers/metrics.py`) and wired into the Extended hedge bot for positions, latency timing, iteration counts, and failure tracking (exposed via `--metrics-port` or `HEDGE_METRICS_PORT`).
 - Implementation: integrate `prometheus_client` or lightweight HTTP server; update counters when trades/log events fire.
 
 ### 8. Config-Driven Risk Limits

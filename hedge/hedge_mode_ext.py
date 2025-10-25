@@ -20,7 +20,6 @@ from x10.perpetual.positions import PositionStatus, PositionSide
 from x10.perpetual.orders import OrderSide, TimeInForce
 from x10.utils.date import utc_now
 from helpers.alerting import send_telegram_message
-from helpers.metrics import HedgeMetrics
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -60,7 +59,6 @@ class HedgeBot:
             hold_min: Optional[float] = None,
             hold_max: Optional[float] = None,
             bot_name: Optional[str] = None,
-            metrics_port: Optional[int] = None,
     ):
         self.ticker = ticker
         self.order_quantity = order_quantity
@@ -88,9 +86,6 @@ class HedgeBot:
         if self.hold_max < self.hold_min:
             raise ValueError("hold_max cannot be less than hold_min")
         self.bot_name = bot_name or os.getenv("HEDGE_BOT_NAME") or f"hedge-{self.ticker}"
-        env_metrics_port = os.getenv("HEDGE_METRICS_PORT")
-        self.metrics_port = metrics_port if metrics_port is not None else (int(env_metrics_port) if env_metrics_port else None)
-        self.metrics = HedgeMetrics(self.bot_name, self.ticker, port=self.metrics_port)
         self.extended_volume_base = Decimal('0')
         self.extended_volume_notional = Decimal('0')
         self.lighter_volume_base = Decimal('0')
@@ -202,8 +197,6 @@ class HedgeBot:
             self.logger.info("🔀 Opening direction mode: random")
         else:
             self.logger.info(f"➡️ Opening direction mode: always {self.direction_mode.upper()}")
-
-        self._update_position_metrics()
 
         # State management
         self.stop_flag = False
@@ -368,11 +361,8 @@ class HedgeBot:
             self.logger.info(f"📊 Trade logged to CSV: {exchange} {side} {quantity} @ {price}")
 
     def _update_position_metrics(self):
-        """Push latest position readings to the metrics backend."""
-        try:
-            self.metrics.set_positions(self.extended_position, self.lighter_position)
-        except Exception as exc:  # pragma: no cover - defensive
-            self.logger.debug("Metrics update skipped (metrics disabled): %s", exc, exc_info=True)
+        """Placeholder for future metrics integration (no-op)."""
+        return
 
 
     def _random_bps(self, minimum: Decimal, maximum: Decimal) -> Decimal:
@@ -516,20 +506,28 @@ class HedgeBot:
             return
         self.logger.info(f"⏸️ Holding exposure for {duration:.2f}s ({context})")
         self.last_hold_duration = duration
-        try:
-            self.metrics.record_hold_duration(duration)
-        except Exception as exc:  # pragma: no cover - defensive
-            self.logger.debug("Hold duration metric skipped: %s", exc, exc_info=True)
-        deadline = time.monotonic() + duration
-        while not self.stop_flag and time.monotonic() < deadline:
-            await asyncio.sleep(min(1.0, deadline - time.monotonic()))
-            try:
-                await self.reconcile_positions(f"hold_{context}")
-            except Exception as reconcile_error:
-                self.logger.error(f"⚠️ Failed to reconcile during hold: {reconcile_error}")
-            if not await self._ensure_balanced_positions(f"hold_{context}"):
-                if self.stop_flag:
-                    break
+        sleep_coro = asyncio.sleep(duration)
+        reconcile_coro = self.reconcile_positions(f"hold_{context}")
+        sleep_result, reconcile_result = await asyncio.gather(
+            sleep_coro,
+            reconcile_coro,
+            return_exceptions=True,
+        )
+
+        if isinstance(reconcile_result, asyncio.CancelledError):
+            raise reconcile_result
+        if isinstance(reconcile_result, Exception):
+            self.logger.error(f"⚠️ Failed to reconcile during hold: {reconcile_result}")
+        elif not await self._ensure_balanced_positions(f"hold_{context}"):
+            if self.stop_flag:
+                return
+
+        if isinstance(sleep_result, asyncio.CancelledError):
+            raise sleep_result
+        if isinstance(sleep_result, Exception):
+            # Propagate cancellation/exception to caller
+            raise sleep_result
+
         self.logger.info(f"▶️ Hold complete ({context})")
 
     async def _send_iteration_summary(self, iteration_number: int):
@@ -1336,10 +1334,6 @@ class HedgeBot:
                 if self.last_extended_fill_monotonic is not None:
                     send_latency_ms = (send_time - self.last_extended_fill_monotonic) * 1000
                     self.logger.info(f"⏱️ Hedge send latency: {send_latency_ms:.1f} ms")
-                    try:
-                        self.metrics.observe_latency("extended_to_lighter_send", send_latency_ms)
-                    except Exception as exc:  # pragma: no cover - defensive
-                        self.logger.debug("Send latency metric skipped: %s", exc, exc_info=True)
                 self.last_lighter_send_monotonic = send_time
                 filled = await self.monitor_lighter_order(client_order_index)
                 if filled:
@@ -1347,17 +1341,9 @@ class HedgeBot:
                     if self.last_lighter_send_monotonic is not None:
                         send_to_fill_ms = (now - self.last_lighter_send_monotonic) * 1000
                         self.logger.info(f"⏱️ Hedge fill latency (send→fill): {send_to_fill_ms:.1f} ms")
-                        try:
-                            self.metrics.observe_latency("lighter_send_to_fill", send_to_fill_ms)
-                        except Exception as exc:  # pragma: no cover
-                            self.logger.debug("Hedge latency metric skipped: %s", exc, exc_info=True)
                     if self.last_extended_fill_monotonic is not None:
                         total_ms = (now - self.last_extended_fill_monotonic) * 1000
                         self.logger.info(f"⏱️ Hedge total latency (fill→fill): {total_ms:.1f} ms")
-                        try:
-                            self.metrics.observe_latency("extended_fill_to_lighter_fill", total_ms)
-                        except Exception as exc:  # pragma: no cover
-                            self.logger.debug("Total latency metric skipped: %s", exc, exc_info=True)
                     return tx_hash
 
                 last_error = RuntimeError("Timeout awaiting Lighter fill")
@@ -1572,10 +1558,6 @@ class HedgeBot:
 
     async def _handle_hedge_failure(self, reason: str, details: str):
         self.logger.error(f"🚨 Hedge failure detected ({reason}): {details}")
-        try:
-            self.metrics.increment_failure(reason)
-        except Exception as exc:  # pragma: no cover - defensive
-            self.logger.debug("Failure metric skipped: %s", exc, exc_info=True)
         failure_exception = None
         try:
             await self._cancel_all_extended_orders()
@@ -1951,10 +1933,6 @@ class HedgeBot:
                     break
 
             if not self.stop_flag and not self.last_exception:
-                try:
-                    self.metrics.record_iteration(iterations)
-                except Exception as exc:  # pragma: no cover - defensive
-                    self.logger.debug("Iteration metric skipped: %s", exc, exc_info=True)
                 asyncio.create_task(self._send_iteration_summary(iterations))
 
             if self.stop_flag:

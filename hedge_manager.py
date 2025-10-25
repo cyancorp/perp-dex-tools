@@ -366,7 +366,10 @@ async def run_manager(
     try:
         while True:
             if stop_event.is_set():
-                LOGGER.info("Stop signal received; exiting manager loop")
+                LOGGER.info("Stop signal received; stopping bots and exiting manager loop")
+                for state in states:
+                    if state.process:
+                        await state.stop("shutdown")
                 break
 
             now = datetime.now(timezone.utc)
